@@ -1,6 +1,8 @@
 {
+  "accounts: [{
     "auth_service": "google",
     "usernames": ["example@gmail.com"],
-    "password": "password11!!",
-    "location": "New York"
+    "password": "password11!!"
+  }],
+  "location": "New York"
 }

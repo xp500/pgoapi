@@ -96,7 +96,6 @@ class RpcApi:
         return http_response
 
     def request(self, endpoint, subrequests, player_position):
-
         if not self._auth_provider or self._auth_provider.is_login() is False:
             raise NotLoggedInException()
 

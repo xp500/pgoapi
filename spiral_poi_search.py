@@ -37,6 +37,7 @@ import argparse
 import pprint
 import datetime
 import webbrowser
+import csv
 
 from pgoapi import PGoApi
 from pgoapi.utilities import f2i, h2f
@@ -88,31 +89,18 @@ def init_config():
     config_file = "config.json"
 
     # If config file exists, load variables from json
-    load   = {}
+    config = {}
     if os.path.isfile(config_file):
         with open(config_file) as data:
-            load.update(json.load(data))
+            config.update(json.load(data))
+    else:
+       print "CONFIG ERROR"
+       return None
 
-    # Read passed in Arguments
-    required = lambda x: x not in load
-    parser.add_argument("-a", "--auth_service", help="Auth Service ('ptc' or 'google')",
-        required=required("auth_service"))
-    parser.add_argument("-u", "--usernames", help="Username", required=required("usernames"))
-    parser.add_argument("-p", "--password", help="Password", required=required("password"))
-    parser.add_argument("-l", "--location", help="Location", required=required("location"))
-    parser.add_argument("-d", "--debug", help="Debug Mode", action='store_true')
-    parser.add_argument("-t", "--test", help="Only parse the specified location", action='store_true')
-    parser.set_defaults(DEBUG=False, TEST=False)
-    config = parser.parse_args()
-
-    # Passed in arguments shoud trump
-    for key in config.__dict__:
-        if key in load and config.__dict__[key] == None:
-            config.__dict__[key] = load[key]
-
-    if config.auth_service not in ['ptc', 'google']:
-      log.error("Invalid Auth service specified! ('ptc' or 'google')")
-      return None
+    for acc in config['accounts']:
+      if acc['auth_service'] not in ['ptc', 'google']:
+        log.error("Invalid Auth service specified! ('ptc' or 'google')")
+        return None
 
     return config
 
@@ -131,61 +119,96 @@ def main():
     if not config:
         return
 
-    if config.debug:
+    if config.get('debug'):
         logging.getLogger("requests").setLevel(logging.DEBUG)
         logging.getLogger("pgoapi").setLevel(logging.DEBUG)
         logging.getLogger("rpc_api").setLevel(logging.DEBUG)
 
-    position = get_pos_by_name(config.location)
+    # Load pokemon pokedex to name map
+    pokedex = {}
+    with open('pokedex.csv', 'r') as csvfile:
+     pokedex_reader = csv.reader(csvfile, delimiter=',')
+     headers = pokedex_reader.next()
+     id_ix = headers.index('species_id')
+     name_ix = headers.index('identifier')
+     for row in pokedex_reader:
+       pokedex[int(row[id_ix])] = row[name_ix] 
+
+    print pokedex
+
+    position = get_pos_by_name(config['location'])
     if not position:
         return
         
-    if config.test:
-        return
-
-
-    usernames = config.usernames
+    accounts = config['accounts']
     apis = []
-
-    for username in usernames:
+    failed_accs = []
+    for account in accounts:
       # instantiate pgoapi
       api = PGoApi()
 
       # provide player position on the earth
       api.set_position(*position)
 
+      login_attempts = 3
+      logged_in = False
+      while not logged_in and login_attempts > 0:
+        logged_in = logged_in - 1
+        try:
+          if api.login(account['auth_service'], account['username'], account['password']):
+            logged_in = True
+        except:
+          pass
+
+      if not logged_in:
+        failed_accs.append(account['username'])
+        print account['username'] + ' failed to log in'
+        continue
+
       apis.append(api)
 
-      if not api.login(config.auth_service, username, config.password):
-        return
+      # chain subrequests (methods) into one RPC call
 
-    # chain subrequests (methods) into one RPC call
+      # get player profile call
+      # ----------------------
+      response_dict = api.get_player()
+      print('Response dictionary: \n\r{}'.format(pprint.PrettyPrinter(indent=4).pformat(response_dict)))
 
-    # get player profile call
-    # ----------------------
-    response_dict = api.get_player()
+    if len(failed_accs) > 0:
+      print 'The following accounts have failed to log in'
+      for p in failed_accs: print p
 
-    # apparently new dict has binary data in it, so formatting it with this method no longer works, pprint works here but there are other alternatives    
-    # print('Response dictionary: \n\r{}'.format(json.dumps(response_dict, indent=2)))
-    print('Response dictionary: \n\r{}'.format(pprint.PrettyPrinter(indent=4).pformat(response_dict)))
+    if len(apis) == 0:
+      print 'All accounts failed to log in, quitting'
+      return
+
+
+
+    wanted_pokemon = [65, 130, 113, 149, 83]
+
     step_size = 0.0015
-    step_limit = 1000
+    step_limit = 2000
+    wait_time = 5
+    accs = len(apis)
+
+    print 'Running with {} accounts'.format(accs)
+    print 'Estimated scan time: {} seconds'.format(1000 * 5 / accs)
+
     coords = generate_spiral(position[0], position[1], step_size, step_limit)
     print_gmaps_dbug(coords)
     threads = []
     for api_ix in range(0, len(apis)):
       coords_for_api = [coords[i] for i in range(api_ix, len(coords), len(apis))]
-      thread = Thread(target = find_poi, args = (apis[api_ix], coords_for_api))
+      thread = Thread(target = find_poi, args = (apis[api_ix], coords_for_api, wait_time, wanted_pokemon, pokedex))
       thread.daemon = True
       threads.append(thread)
       thread.start()
     while threading.active_count() == len(threads) + 1:
       time.sleep(0)
 
-def find_poi(api, coords):
+def find_poi(api, coords, wait_time, wanted_pokemon, pokedex):
   while True:
     poi = {'pokemons': {}, 'forts': []}
-    wanted_pokemons = [65, 71, 130, 132, 149]
     i = 0
     for coord in coords:
         print coord
@@ -198,28 +221,40 @@ def find_poi(api, coords):
         #timestamp gets computed a different way:
         cell_ids = get_cell_ids(lat, lng)
         timestamps = [0,] * len(cell_ids)
-        try:
-         start_time = time.time()
-         response_dict = api.get_map_objects(latitude = util.f2i(lat), longitude = util.f2i(lng), since_timestamp_ms = timestamps, cell_id = cell_ids)
-        except:
-          print("Unexpected error:", sys.exc_info()[0])
-        if response_dict and response_dict['responses'] and 'status' in response_dict['responses']['GET_MAP_OBJECTS'] and response_dict['responses']['GET_MAP_OBJECTS']['status'] == 1:
-          for map_cell in response_dict['responses']['GET_MAP_OBJECTS']['map_cells']:
-            if 'wild_pokemons' in map_cell:
-              for pokemon in map_cell['wild_pokemons']:
-                pokekey = get_key_from_pokemon(pokemon)
-                pokemon['hides_at'] = datetime.datetime.fromtimestamp(time.time() + pokemon['time_till_hidden_ms']/1000).isoformat()
-                if pokemon['pokemon_data']['pokemon_id'] in wanted_pokemons:
-                  print 'POKEMON FOUND!'
-                  print pokemon
-                  print_gmaps_dbug([{'lat': pokemon['latitude'], 'lng': pokemon['longitude']}])
-                  os.system('say "Pokemon found"')
-                  #   poi['pokemons'][pokekey] = pokemon
-        else:
-          print "INVALID RESPONSE"
-        req_duration = time.time() - start_time
-        if req_duration > 0 and req_duration < 5:
-          time.sleep(5 - req_duration)
+
+        successful_request = False
+        retry_attempts = 3
+        while not successful_request and retry_attempts > 0:
+          retry_attempts = retry_attempts - 1
+          try:
+            start_time = time.time()
+            response_dict = api.get_map_objects(latitude = util.f2i(lat), longitude = util.f2i(lng), since_timestamp_ms = timestamps, cell_id = cell_ids)
+          except:
+            response_dict = None
+            print("Unexpected error:", sys.exc_info()[0])
+          if response_dict:
+            if response_dict['responses'] and 'status' in response_dict['responses']['GET_MAP_OBJECTS']:
+              if response_dict['responses']['GET_MAP_OBJECTS']['status'] == 1:
+                successful_request = True
+                for map_cell in response_dict['responses']['GET_MAP_OBJECTS']['map_cells']:
+                  if 'wild_pokemons' in map_cell:
+                    for pokemon in map_cell['wild_pokemons']:
+                      pokekey = get_key_from_pokemon(pokemon)
+                      pokemon['hides_at'] = datetime.datetime.fromtimestamp(time.time() + pokemon['time_till_hidden_ms']/1000).isoformat()
+                      if pokemon['pokemon_data']['pokemon_id'] in wanted_pokemon:
+                        print 'POKEMON FOUND!'
+                        pokemon['name'] = pokedex[pokemon['pokemon_data']['pokemon_id']]
+                        print pokemon
+                        print_gmaps_dbug([{'lat': pokemon['latitude'], 'lng': pokemon['longitude']}])
+                        os.system('say "{} found"'.format(pokemon['name']))
+                  #     poi['pokemons'][pokekey] = pokemon
+          req_duration = time.time() - start_time
+          if req_duration > 0 and req_duration < 5:
+            time.sleep(wait_time - req_duration)
+
+        if not successful_request:
+          print "Request failed 3 times :("
+
     # new dict, binary data
     # print('POI dictionary: \n\r{}'.format(json.dumps(poi, indent=2)))
     #print('POI dictionary: \n\r{}'.format(pprint.PrettyPrinter(indent=4).pformat(poi)))
