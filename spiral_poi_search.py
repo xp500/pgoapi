@@ -196,7 +196,15 @@ def main():
 
     wanted_pokemon = [130, 131, 143, 149]
 
-    find_poi(api, coords, 5, wanted_pokemon, pokedex)
+    threads = []
+    for api_ix in range(0, len(apis)):
+      coords_for_api = [coords[i] for i in range(api_ix, len(coords), len(apis))]
+      thread = Thread(target = find_poi, args = (apis[api_ix], coords_for_api, wait_time, wanted_pokemon, pokedex))
+      thread.daemon = True
+      threads.append(thread)
+      thread.start()
+    while threading.active_count() == len(threads) + 1:
+      time.sleep(0)
 
 def find_poi(api, coords, wait_time, wanted_pokemon, pokedex):
   while True:
