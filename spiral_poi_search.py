@@ -140,6 +140,13 @@ def main():
     if not position:
         return
         
+    step_size = 0.0015
+    step_limit = 3000
+    wait_time = 5
+
+    coords = generate_spiral(position[0], position[1], step_size, step_limit)
+    print_gmaps_dbug(coords)
+
     accounts = config['accounts']
     apis = []
     failed_accs = []
@@ -182,29 +189,14 @@ def main():
       print 'All accounts failed to log in, quitting'
       return
 
-
-
-    wanted_pokemon = [65, 130, 113, 149, 83]
-
-    step_size = 0.0015
-    step_limit = 2000
-    wait_time = 5
     accs = len(apis)
 
     print 'Running with {} accounts'.format(accs)
     print 'Estimated scan time: {} seconds'.format(1000 * 5 / accs)
 
-    coords = generate_spiral(position[0], position[1], step_size, step_limit)
-    print_gmaps_dbug(coords)
-    threads = []
-    for api_ix in range(0, len(apis)):
-      coords_for_api = [coords[i] for i in range(api_ix, len(coords), len(apis))]
-      thread = Thread(target = find_poi, args = (apis[api_ix], coords_for_api, wait_time, wanted_pokemon, pokedex))
-      thread.daemon = True
-      threads.append(thread)
-      thread.start()
-    while threading.active_count() == len(threads) + 1:
-      time.sleep(0)
+    wanted_pokemon = [130, 131, 143, 149]
+
+    find_poi(api, coords, 5, wanted_pokemon, pokedex)
 
 def find_poi(api, coords, wait_time, wanted_pokemon, pokedex):
   while True:
@@ -240,14 +232,15 @@ def find_poi(api, coords, wait_time, wanted_pokemon, pokedex):
                   if 'wild_pokemons' in map_cell:
                     for pokemon in map_cell['wild_pokemons']:
                       pokekey = get_key_from_pokemon(pokemon)
-                      pokemon['hides_at'] = datetime.datetime.fromtimestamp(time.time() + pokemon['time_till_hidden_ms']/1000).isoformat()
-                      if pokemon['pokemon_data']['pokemon_id'] in wanted_pokemon:
-                        print 'POKEMON FOUND!'
-                        pokemon['name'] = pokedex[pokemon['pokemon_data']['pokemon_id']]
-                        print pokemon
-                        print_gmaps_dbug([{'lat': pokemon['latitude'], 'lng': pokemon['longitude']}])
-                        os.system('say "{} found"'.format(pokemon['name']))
-                  #     poi['pokemons'][pokekey] = pokemon
+                      if pokemon['time_till_hidden_ms'] > 0:
+                        pokemon['hides_at'] = datetime.datetime.fromtimestamp(time.time() + pokemon['time_till_hidden_ms']/1000).isoformat()
+                        if pokemon['pokemon_data']['pokemon_id'] in wanted_pokemon:
+                          print 'POKEMON FOUND!'
+                          pokemon['name'] = pokedex[pokemon['pokemon_data']['pokemon_id']]
+                          print pokemon
+                          print_gmaps_dbug([{'lat': pokemon['latitude'], 'lng': pokemon['longitude']}])
+                          os.system('say "{} found"'.format(pokemon['name']))
+                  #       poi['pokemons'][pokekey] = pokemon
           req_duration = time.time() - start_time
           if req_duration > 0 and req_duration < 5:
             time.sleep(wait_time - req_duration)
